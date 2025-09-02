@@ -1,0 +1,28 @@
+# Copy this file to terraform.tfvars and fill in your values
+
+# AWS Configuration
+aws_region = "us-east-1"
+environment = "dev"
+
+# Database Configuration
+db_username = "edumate_user"
+db_password = "your_secure_password_here"
+
+# RDS Configuration
+rds_instance_class = "db.t3.micro"
+
+# ECS Configuration
+ecs_cpu = 512
+ecs_memory = 1024
+ecs_desired_count = 1
+ecs_min_count = 1
+ecs_max_count = 3
+
+# SSL Certificate (optional for dev)
+certificate_arn = ""
+
+# ECR Repository URL (will be created by CI/CD)
+ecr_repository_url = ""
+
+# OpenAI API Key ARN in Secrets Manager
+openai_api_key_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:openai-api-key-xyz123"
