@@ -1,83 +1,142 @@
 # EduMate-AI
 
-An intelligent educational platform that transforms notes and textbooks into interactive learning experiences using AI-powered Q&A, quizzes, and flashcards.
+A backend-first LLM workflow system for document-based question answering, quiz generation, and flashcard creation using retrieval-augmented pipelines.
 
-## 🚀 Features
+## 🚀 Overview
 
-- **Smart Document Processing**: Upload PDFs and text documents with automatic chunking and embedding
-- **AI-Powered Q&A**: Get instant answers to questions using Retrieval-Augmented Generation (RAG)
-- **Interactive Learning**: Generate quizzes and flashcards from your study materials
-- **Progress Tracking**: Monitor your learning progress and study patterns
-- **Real-time Chat**: Interactive chat interface for seamless learning
+EduMate-AI processes user-uploaded documents and exposes modular AI workflows for:
+
+- Question answering (RAG)
+- Quiz generation
+- Flashcard generation
+
+The system is designed with deterministic routing, validation guardrails, and observable backend services, making it reliable and production-oriented rather than a simple chatbot demo.
+
+## 🧠 Workflow Architecture
+
+The backend is structured as modular, deterministic workflows:
+
+### 1. RAG Workflow (Q&A)
+
+Input → Retrieval (Chroma) → Context Validation → LLM Generation → Post-processing
+
+### 2. Quiz Workflow
+
+Document Content → Validation → Structured LLM Generation → JSON Parsing → Persistence
+
+### 3. Flashcard Workflow
+
+Document Content → Validation → LLM Generation → Storage in PostgreSQL
+
+## 🔀 Intent Routing
+
+A lightweight router selects workflows based on explicit intent:
+
+- `qa`
+- `quiz`
+- `flashcards`
+
+Keyword-based fallback is used for robustness.
+
+## 🛡️ Guardrails
+
+- Retrieval filtered by `document_id` and `user_id`
+- Context validation before generation
+- Safe fallback responses when context is weak
+- Structured parsing for quiz outputs
+
+## 📊 Observability
+
+- Request tracing via `X-Request-ID`
+- Stage-level logging (retrieval, generation, latency)
+- Health and readiness endpoints
 
 ## 🏗️ Architecture
 
-### Frontend
-- **Framework**: Next.js 14 with React 18
-- **Styling**: Tailwind CSS + Headless UI components
-- **Authentication**: Firebase Auth with Google OAuth
-- **Deployment**: Vercel
+### Backend (Primary Focus)
 
-### Backend
-- **Framework**: FastAPI (Python 3.11+)
-- **AI/LLM**: OpenAI GPT-4 via LangChain
-- **Vector Database**: Chroma for semantic search
-- **File Storage**: AWS S3
-- **Database**: PostgreSQL
-- **Deployment**: AWS Fargate
+- Framework: FastAPI (Python 3.11+)
+- LLM Stack: OpenAI GPT-4 via LangChain
+- Vector Store: Chroma (document-scoped retrieval)
+- Database: PostgreSQL (documents, quizzes, flashcards, progress)
+- Storage: AWS S3
+- Migrations: Alembic
+- Deployment: AWS Fargate
 
-### AI Pipeline
-- **Document Processing**: PDF/text chunking and embedding generation
-- **RAG System**: Vector search + LLM context retrieval
-- **Content Generation**: Quizzes, flashcards, and Q&A responses
+### Frontend (Minimal)
+
+- Framework: Next.js 14 + React 18
+- Auth: Firebase (Google OAuth)
+- Used for basic interaction; primary focus is backend workflows
 
 ## 🛠️ Tech Stack
 
-- **Frontend**: Next.js, React, Tailwind CSS, Firebase
-- **Backend**: FastAPI, Python, LangChain, Chroma
-- **AI/ML**: OpenAI GPT-4, Embeddings
-- **Infrastructure**: AWS (S3, EC2/Fargate, RDS), Vercel
-- **Monitoring**: Sentry, Weights & Biases, CloudWatch
-- **CI/CD**: GitHub Actions
+| Layer | Technologies |
+|------|--------------|
+| Backend | FastAPI, Python, SQLAlchemy |
+| LLM / AI | OpenAI GPT-4, LangChain |
+| Retrieval | Chroma (vector search) |
+| Storage | AWS S3 |
+| Database | PostgreSQL |
+| Infra | AWS (Fargate, RDS), Vercel |
+| Monitoring | Sentry, W&B, CloudWatch |
+| CI/CD | GitHub Actions |
 
 ## 📁 Project Structure
 
 ```
-EduMate-AI/
-├── backend/                 # FastAPI backend
-│   ├── app/
-│   ├── requirements.txt
-│   └── Dockerfile
-├── frontend/                # Next.js frontend
-│   ├── src/
-│   ├── package.json
-│   └── next.config.js
-├── infrastructure/          # AWS deployment configs
-├── .github/                 # GitHub Actions CI/CD
-└── docs/                    # Documentation
+backend/
+  app/
+    api/          # FastAPI routes
+    workflows/    # RAG, quiz, flashcard pipelines
+    services/     # Retrieval, generation, storage
+    guards/       # Validation and fallback logic
+    routing/      # Intent router
+    database.py
+  alembic/        # DB migrations
+  requirements.txt
+
+frontend/
+  src/
+
+infrastructure/
+.github/
 ```
+
+## 🔄 Example Flow
+
+1. User uploads document → stored in S3 and chunked into embeddings
+2. Query sent with intent (`qa`, `quiz`, `flashcards`)
+3. Router selects workflow
+4. Retrieval filtered by document + user
+5. Context validated before LLM
+6. LLM generates output
+7. Output validated, stored, and returned
 
 ## 🚀 Quick Start
 
 ### Prerequisites
+
 - Python 3.11+
 - Node.js 18+
-- Docker
-- AWS CLI configured
 - OpenAI API key
 
 ### Backend Setup
+
 ```bash
 cd backend
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate
 pip install -r requirements.txt
-# Apply DB migrations (production / existing DBs). From backend/: set DATABASE_URL or use .env
+
+# Apply migrations (recommended for Postgres)
 alembic upgrade head
+
 uvicorn app.main:app --reload
 ```
 
-### Frontend Setup
+### Frontend Setup (Optional)
+
 ```bash
 cd frontend
 npm install
@@ -85,70 +144,44 @@ npm run dev
 ```
 
 ### Environment Variables
-Create `.env.local` in frontend and `.env` in backend:
+
+Copy the template:
+
 ```bash
-# OpenAI
-OPENAI_API_KEY=your_key_here
-
-# Firebase
-NEXT_PUBLIC_FIREBASE_API_KEY=your_key
-FIREBASE_ADMIN_CREDENTIALS=path_to_service_account.json
-
-# AWS
-AWS_ACCESS_KEY_ID=your_key
-AWS_SECRET_ACCESS_KEY=your_secret
-AWS_REGION=us-east-1
-
-# Database
-DATABASE_URL=postgresql://user:pass@localhost:5432/edumate
-
-# Optional: set false for local dev without a real S3 bucket (upload may still fail)
-# S3_VERIFY_BUCKET_ON_INIT=false
+cp .env.example backend/.env
+cp .env.example frontend/.env.local
 ```
 
-## 🔧 Development
+Minimum required (backend):
 
-### Running Tests
 ```bash
-# Backend
+DATABASE_URL=sqlite:///./edumate.db
+OPENAI_API_KEY=your_key
+```
+
+## 🧪 Development
+
+### Run Tests
+
+```bash
 cd backend
 pytest
-
-# Frontend
-cd frontend
-npm run test
 ```
 
-### Building for Production
-```bash
-# Backend
-cd backend
-docker build -t edumate-backend .
+## ⚠️ Limitations
 
-# Frontend
-cd frontend
-npm run build
-```
+- Frontend is minimal and primarily for demonstration
+- Legacy embeddings may require reprocessing for strict filtering
+- Ingestion runs asynchronously after upload in-process (FastAPI background task)
+- Retrieval quality depends on chunking and embedding strategy
 
-## 📊 Monitoring & Analytics
+## 🎯 Design Goals
 
-- **Error Tracking**: Sentry integration
-- **Performance**: Real-time monitoring with CloudWatch
-- **AI Metrics**: Weights & Biases for model tracking
-- **User Analytics**: Google Analytics integration
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
+- Modular and deterministic LLM workflows
+- Reliable, explainable retrieval pipelines
+- Backend-first architecture
+- Production-aware design (logging, migrations, health checks)
 
 ## 📄 License
 
-MIT License - see LICENSE file for details
-
-## 🆘 Support
-
-For support and questions, please open an issue in the GitHub repository.
+MIT License
