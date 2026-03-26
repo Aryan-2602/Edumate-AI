@@ -2,6 +2,10 @@ node_modules/
 .next/
 .DS_Store
 .env*
+!.env.example
+!.env.local.example
+!backend/.env.example
+!frontend/.env.local.example
 out/
 backend/test_edumate.db
 backend/chroma_db/
