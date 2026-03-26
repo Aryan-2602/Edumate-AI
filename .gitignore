@@ -3,3 +3,10 @@ node_modules/
 .DS_Store
 .env*
 out/
+backend/test_edumate.db
+backend/chroma_db/
+__pycache__/
+*.py[cod]
+backend/.coverage
+backend/coverage.xml
+frontend/coverage/

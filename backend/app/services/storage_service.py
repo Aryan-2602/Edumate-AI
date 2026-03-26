@@ -27,10 +27,17 @@ class StorageService:
             else:
                 # Try to use default credentials (IAM roles, etc.)
                 self.s3_client = boto3.client('s3', region_name=settings.aws_region)
-            
-            # Test connection
-            self.s3_client.head_bucket(Bucket=self.bucket_name)
-            logger.info(f"Successfully connected to S3 bucket: {self.bucket_name}")
+
+            if settings.s3_verify_bucket_on_init:
+                self.s3_client.head_bucket(Bucket=self.bucket_name)
+                logger.info(
+                    "Successfully connected to S3 bucket: %s", self.bucket_name
+                )
+            else:
+                logger.warning(
+                    "S3 client created without bucket verification "
+                    "(S3_VERIFY_BUCKET_ON_INIT=false)"
+                )
             
         except NoCredentialsError:
             logger.error("AWS credentials not found")

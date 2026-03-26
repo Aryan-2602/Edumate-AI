@@ -72,6 +72,8 @@ cd backend
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
+# Apply DB migrations (production / existing DBs). From backend/: set DATABASE_URL or use .env
+alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
@@ -99,6 +101,9 @@ AWS_REGION=us-east-1
 
 # Database
 DATABASE_URL=postgresql://user:pass@localhost:5432/edumate
+
+# Optional: set false for local dev without a real S3 bucket (upload may still fail)
+# S3_VERIFY_BUCKET_ON_INIT=false
 ```
 
 ## 🔧 Development

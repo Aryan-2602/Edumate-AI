@@ -1,21 +1,28 @@
+import logging
+import time
+import uuid
+from contextlib import asynccontextmanager
+
+import sentry_sdk
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
-import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
-import logging
-import time
-from contextlib import asynccontextmanager
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy import text
 
 from app.config import settings
-from app.database import create_tables
+from app.database import create_tables, engine
+from app.rate_limit import limiter
+from app import telemetry
 from app.api import auth, documents, ai
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -23,10 +30,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
-    # Startup
     logger.info("Starting EduMate-AI Backend...")
-    
-    # Initialize Sentry if configured
+    telemetry.init_wandb()
+
     if settings.sentry_dsn:
         try:
             sentry_sdk.init(
@@ -37,39 +43,50 @@ async def lifespan(app: FastAPI):
             )
             logger.info("Sentry initialized successfully")
         except Exception as e:
-            logger.warning(f"Failed to initialize Sentry: {e}")
-    
-    # Create database tables
+            logger.warning("Failed to initialize Sentry: %s", e)
+
     try:
         create_tables()
         logger.info("Database tables created/verified successfully")
     except Exception as e:
-        logger.error(f"Failed to create database tables: {e}")
+        logger.error("Failed to create database tables: %s", e)
         raise
-    
+
     yield
-    
-    # Shutdown
+
     logger.info("Shutting down EduMate-AI Backend...")
+    telemetry.finish_wandb()
 
 
-# Create FastAPI app
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description="AI-powered educational platform for interactive learning",
     docs_url="/docs" if settings.debug else None,
     redoc_url="/redoc" if settings.debug else None,
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
-# Add middleware
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",  # Frontend dev
-        "https://edumate-ai.vercel.app",  # Frontend prod
-        "https://*.vercel.app",  # Vercel previews
+        "http://localhost:3000",
+        "https://edumate-ai.vercel.app",
+        "https://*.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -81,14 +98,14 @@ app.add_middleware(
     allowed_hosts=[
         "localhost",
         "127.0.0.1",
+        "testserver",  # FastAPI TestClient default host
         "*.vercel.app",
         "*.amazonaws.com",
         "*.elasticbeanstalk.com",
-    ]
+    ],
 )
 
 
-# Request timing middleware
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
     start_time = time.time()
@@ -98,55 +115,70 @@ async def add_process_time_header(request: Request, call_next):
     return response
 
 
-# Global exception handler
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    logger.error("Unhandled exception: %s", exc, exc_info=True)
     return JSONResponse(
         status_code=500,
         content={
             "detail": "Internal server error",
-            "error": str(exc) if settings.debug else "Something went wrong"
-        }
+            "error": str(exc) if settings.debug else "Something went wrong",
+        },
     )
 
 
-# Health check endpoint
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for load balancers and monitoring"""
+    """Liveness: process is up."""
     return {
         "status": "healthy",
         "service": "edumate-ai-backend",
         "version": settings.app_version,
-        "timestamp": time.time()
+        "timestamp": time.time(),
     }
 
 
-# Include API routers
+@app.get("/health/ready")
+async def readiness_check():
+    """Readiness: dependencies required for traffic."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {
+            "status": "ready",
+            "database": "ok",
+        }
+    except Exception as e:
+        logger.warning("Readiness check failed: %s", e)
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unready", "database": "error", "detail": str(e)},
+        )
+
+
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(documents.router, prefix="/api/v1")
 app.include_router(ai.router, prefix="/api/v1")
 
 
-# Root endpoint
 @app.get("/")
 async def root():
-    """Root endpoint with API information"""
     return {
         "message": "Welcome to EduMate-AI Backend",
         "version": settings.app_version,
         "docs": "/docs" if settings.debug else "Documentation disabled in production",
-        "health": "/health"
+        "health": "/health",
+        "ready": "/health/ready",
     }
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         "app.main:app",
         host=settings.host,
         port=settings.port,
         reload=settings.debug,
-        log_level="info"
+        log_level="info",
     )

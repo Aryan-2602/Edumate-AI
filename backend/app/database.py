@@ -27,6 +27,7 @@ class User(Base):
     questions = relationship("Question", back_populates="user")
     quizzes = relationship("Quiz", back_populates="user")
     progress = relationship("UserProgress", back_populates="user")
+    flashcard_sets = relationship("FlashcardSet", back_populates="user")
 
 
 class Document(Base):
@@ -42,6 +43,9 @@ class Document(Base):
     content_summary = Column(Text)
     chunk_count = Column(Integer, default=0)
     is_processed = Column(Boolean, default=False)
+    chroma_collection_name = Column(String, nullable=True)
+    content_hash = Column(String(64), nullable=True)  # sha256 hex
+    embedding_updated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     
@@ -115,7 +119,7 @@ class UserProgress(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, ForeignKey("users.id"))
-    document_id = Column(Integer, ForeignKey("documents.id"))
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=True)
     questions_asked = Column(Integer, default=0)
     quizzes_taken = Column(Integer, default=0)
     flashcards_reviewed = Column(Integer, default=0)
@@ -126,6 +130,35 @@ class UserProgress(Base):
     
     # Relationships
     user = relationship("User", back_populates="progress")
+    document = relationship("Document", foreign_keys=[document_id])
+
+
+class FlashcardSet(Base):
+    __tablename__ = "flashcard_sets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    source_document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    card_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=func.now())
+
+    user = relationship("User", back_populates="flashcard_sets")
+    document = relationship("Document")
+    cards = relationship("Flashcard", back_populates="flashcard_set")
+
+
+class Flashcard(Base):
+    __tablename__ = "flashcards"
+
+    id = Column(Integer, primary_key=True, index=True)
+    flashcard_set_id = Column(Integer, ForeignKey("flashcard_sets.id"), nullable=False)
+    front = Column(Text, nullable=False)
+    back = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=func.now())
+
+    flashcard_set = relationship("FlashcardSet", back_populates="cards")
 
 
 # Database dependency
