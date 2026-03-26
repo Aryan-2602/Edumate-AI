@@ -18,7 +18,7 @@ from app.config import settings
 from app.database import create_tables, engine
 from app.rate_limit import limiter
 from app import telemetry
-from app.api import auth, documents, ai
+from app.api import auth, documents, ai, intent, diagnostics
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,6 +76,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 async def add_request_id(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
     request.state.request_id = request_id
+    request.state.request_start_perf = time.perf_counter()
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     return response
@@ -159,6 +160,8 @@ async def readiness_check():
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(documents.router, prefix="/api/v1")
 app.include_router(ai.router, prefix="/api/v1")
+app.include_router(intent.router, prefix="/api/v1")
+app.include_router(diagnostics.router, prefix="/api/v1")
 
 
 @app.get("/")

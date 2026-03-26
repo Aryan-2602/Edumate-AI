@@ -1,7 +1,7 @@
-import { initializeApp } from 'firebase/app'
-import { getAuth } from 'firebase/auth'
-import { getFirestore } from 'firebase/firestore'
-import { getStorage } from 'firebase/storage'
+import { getApps, initializeApp, type FirebaseApp } from 'firebase/app'
+import { getAuth, type Auth } from 'firebase/auth'
+import { getFirestore, type Firestore } from 'firebase/firestore'
+import { getStorage, type FirebaseStorage } from 'firebase/storage'
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -13,12 +13,36 @@ const firebaseConfig = {
   measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
 }
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig)
+function canInitializeFirebase(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    !!firebaseConfig.apiKey &&
+    !!firebaseConfig.authDomain &&
+    !!firebaseConfig.projectId
+  )
+}
 
-// Initialize Firebase services
-export const auth = getAuth(app)
-export const db = getFirestore(app)
-export const storage = getStorage(app)
+export function getFirebaseApp(): FirebaseApp | null {
+  if (!canInitializeFirebase()) return null
+  const existing = getApps()
+  if (existing.length > 0) return existing[0]
+  return initializeApp(firebaseConfig)
+}
 
-export default app
+export function getFirebaseAuth(): Auth | null {
+  const app = getFirebaseApp()
+  if (!app) return null
+  return getAuth(app)
+}
+
+export function getFirestoreDb(): Firestore | null {
+  const app = getFirebaseApp()
+  if (!app) return null
+  return getFirestore(app)
+}
+
+export function getFirebaseStorage(): FirebaseStorage | null {
+  const app = getFirebaseApp()
+  if (!app) return null
+  return getStorage(app)
+}

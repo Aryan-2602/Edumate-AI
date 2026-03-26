@@ -3,17 +3,17 @@ import logging
 import os
 import tempfile
 import uuid
-from datetime import datetime
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user
 from app.config import settings
 from app.database import Document, DocumentChunk, User, get_db
 from app.deps import get_ai_service, get_storage_service
+from app.jobs.document_ingestion import run_ingestion_for_document
 from app.rate_limit import limiter
-from app.services.ai_service import AIService, stamp_chunk_metadata
 from app.services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
@@ -25,14 +25,14 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 @limiter.limit(settings.rate_limit_upload)
 async def upload_document(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     title: str = Form(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    ai_service: AIService = Depends(get_ai_service),
     storage_service: StorageService = Depends(get_storage_service),
 ):
-    """Upload and process a document"""
+    """Upload file to storage; chunking and embedding run in a background task."""
     try:
         allowed_types = ["pdf", "docx", "doc", "txt", "md"]
         file_extension = file.filename.split(".")[-1].lower()
@@ -65,7 +65,6 @@ async def upload_document(
                 content_type=file.content_type,
             )
 
-            documents = ai_service.process_document(temp_file_path, file_extension)
             collection_name = f"user_{current_user.id}_docs"
             content_hash = hashlib.sha256(content).hexdigest()
 
@@ -76,43 +75,41 @@ async def upload_document(
                 file_path=s3_key,
                 file_size=len(content),
                 file_type=file_extension,
-                chunk_count=len(documents),
-                is_processed=True,
+                chunk_count=0,
+                is_processed=False,
                 chroma_collection_name=collection_name,
                 content_hash=content_hash,
+                processing_status="pending",
+                processing_error=None,
             )
             db.add(db_document)
             db.commit()
             db.refresh(db_document)
 
-            stamp_chunk_metadata(documents, current_user.id, db_document.id)
-            ai_service.create_embeddings(documents, collection_name)
-
-            for i, doc in enumerate(documents):
-                chunk = DocumentChunk(
-                    document_id=db_document.id,
-                    chunk_index=i,
-                    content=doc.page_content,
-                    embedding_id=f"chunk_{db_document.id}_{i}",
-                )
-                db.add(chunk)
-
-            db_document.embedding_updated_at = datetime.utcnow()
-            db.commit()
+            background_tasks.add_task(
+                run_ingestion_for_document,
+                db_document.id,
+                False,
+            )
 
             logger.info(
-                "Document uploaded successfully: %s by user %s",
+                "Document upload accepted (processing async): id=%s file=%s user=%s",
+                db_document.id,
                 file.filename,
                 current_user.id,
             )
 
-            return {
-                "message": "Document uploaded and processed successfully",
-                "document_id": db_document.id,
-                "title": db_document.title,
-                "chunk_count": db_document.chunk_count,
-                "file_size": db_document.file_size,
-            }
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED,
+                content={
+                    "message": "Upload accepted; processing continues in the background",
+                    "document_id": db_document.id,
+                    "title": db_document.title,
+                    "processing_status": db_document.processing_status,
+                    "chunk_count": db_document.chunk_count,
+                    "file_size": db_document.file_size,
+                },
+            )
 
         finally:
             os.unlink(temp_file_path)
@@ -147,6 +144,8 @@ async def list_documents(
                 "file_type": doc.file_type,
                 "chunk_count": doc.chunk_count,
                 "is_processed": doc.is_processed,
+                "processing_status": doc.processing_status,
+                "processing_error": doc.processing_error,
                 "created_at": doc.created_at,
                 "updated_at": doc.updated_at,
                 "chroma_collection_name": doc.chroma_collection_name,
@@ -205,6 +204,8 @@ async def get_document(
             "file_type": document.file_type,
             "chunk_count": document.chunk_count,
             "is_processed": document.is_processed,
+            "processing_status": document.processing_status,
+            "processing_error": document.processing_error,
             "download_url": download_url,
             "chunks": [
                 {
@@ -236,7 +237,6 @@ async def delete_document(
     document_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    ai_service: AIService = Depends(get_ai_service),
     storage_service: StorageService = Depends(get_storage_service),
 ):
     """Delete a document and its associated data"""
@@ -262,7 +262,7 @@ async def delete_document(
         except Exception as e:
             logger.warning("Failed to delete file from S3: %s", e)
 
-        ai_service.delete_document_vectors(collection_name, document_id)
+        get_ai_service().delete_document_vectors(collection_name, document_id)
 
         db.query(DocumentChunk).filter(
             DocumentChunk.document_id == document_id
@@ -293,13 +293,12 @@ async def delete_document(
 @limiter.limit(settings.rate_limit_upload)
 async def reprocess_document(
     request: Request,
+    background_tasks: BackgroundTasks,
     document_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    ai_service: AIService = Depends(get_ai_service),
-    storage_service: StorageService = Depends(get_storage_service),
 ):
-    """Reprocess a document to regenerate embeddings"""
+    """Queue reprocessing (re-chunk and re-embed) in the background."""
     try:
         document = (
             db.query(Document)
@@ -316,62 +315,37 @@ async def reprocess_document(
                 detail="Document not found",
             )
 
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=f".{document.file_type}"
-        ) as temp_file:
-            storage_service.download_file(document.file_path, temp_file.name)
-            temp_file_path = temp_file.name
+        document.processing_status = "pending"
+        document.processing_error = None
+        document.is_processed = False
+        db.commit()
+        db.refresh(document)
 
-        try:
-            collection_name = f"user_{current_user.id}_docs"
-            ai_service.delete_document_vectors(collection_name, document_id)
+        background_tasks.add_task(
+            run_ingestion_for_document,
+            document_id,
+            True,
+        )
 
-            with open(temp_file_path, "rb") as f:
-                file_bytes = f.read()
-            content_hash = hashlib.sha256(file_bytes).hexdigest()
+        logger.info(
+            "Document %s reprocess queued by user %s",
+            document_id,
+            current_user.id,
+        )
 
-            documents = ai_service.process_document(
-                temp_file_path, document.file_type
-            )
-
-            db.query(DocumentChunk).filter(
-                DocumentChunk.document_id == document_id
-            ).delete()
-
-            stamp_chunk_metadata(documents, current_user.id, document_id)
-            ai_service.create_embeddings(documents, collection_name)
-
-            for i, doc in enumerate(documents):
-                chunk = DocumentChunk(
-                    document_id=document_id,
-                    chunk_index=i,
-                    content=doc.page_content,
-                    embedding_id=f"chunk_{document_id}_{i}",
-                )
-                db.add(chunk)
-
-            document.chunk_count = len(documents)
-            document.chroma_collection_name = collection_name
-            document.content_hash = content_hash
-            document.embedding_updated_at = datetime.utcnow()
-            document.updated_at = datetime.utcnow()
-
-            db.commit()
-
-            logger.info("Document %s reprocessed successfully", document_id)
-
-            return {
-                "message": "Document reprocessed successfully",
-                "chunk_count": document.chunk_count,
-            }
-
-        finally:
-            os.unlink(temp_file_path)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "message": "Reprocessing queued; embeddings will refresh in the background",
+                "document_id": document_id,
+                "processing_status": document.processing_status,
+            },
+        )
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error reprocessing document %s: %s", document_id, e)
+        logger.error("Error queuing reprocess for document %s: %s", document_id, e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error reprocessing document",

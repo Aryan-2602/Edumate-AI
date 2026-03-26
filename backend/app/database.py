@@ -46,6 +46,9 @@ class Document(Base):
     chroma_collection_name = Column(String, nullable=True)
     content_hash = Column(String(64), nullable=True)  # sha256 hex
     embedding_updated_at = Column(DateTime, nullable=True)
+    # Background ingestion: pending | processing | completed | failed
+    processing_status = Column(String, default="pending", nullable=False)
+    processing_error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     

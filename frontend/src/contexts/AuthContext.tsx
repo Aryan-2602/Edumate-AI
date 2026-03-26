@@ -10,7 +10,7 @@ import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword
 } from 'firebase/auth'
-import { auth } from '@/lib/firebase'
+import { getFirebaseAuth } from '@/lib/firebase'
 import { useRouter } from 'next/navigation'
 
 interface AuthContextType {
@@ -38,6 +38,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter()
 
   useEffect(() => {
+    const auth = getFirebaseAuth()
+    if (!auth) {
+      setUser(null)
+      setLoading(false)
+      return
+    }
+
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setUser(user)
       setLoading(false)
@@ -48,6 +55,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signInWithGoogle = async () => {
     try {
+      const auth = getFirebaseAuth()
+      if (!auth) {
+        throw new Error('Firebase is not configured. Set NEXT_PUBLIC_FIREBASE_* env vars.')
+      }
       const provider = new GoogleAuthProvider()
       provider.addScope('email')
       provider.addScope('profile')
@@ -55,8 +66,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const result = await signInWithPopup(auth, provider)
       setUser(result.user)
       
-      // Redirect to dashboard after successful login
-      router.push('/dashboard')
+      router.push('/demo')
     } catch (error) {
       console.error('Error signing in with Google:', error)
       throw error
@@ -65,11 +75,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signInWithEmail = async (email: string, password: string) => {
     try {
+      const auth = getFirebaseAuth()
+      if (!auth) {
+        throw new Error('Firebase is not configured. Set NEXT_PUBLIC_FIREBASE_* env vars.')
+      }
       const result = await signInWithEmailAndPassword(auth, email, password)
       setUser(result.user)
       
-      // Redirect to dashboard after successful login
-      router.push('/dashboard')
+      router.push('/demo')
     } catch (error) {
       console.error('Error signing in with email:', error)
       throw error
@@ -78,11 +91,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signUpWithEmail = async (email: string, password: string) => {
     try {
+      const auth = getFirebaseAuth()
+      if (!auth) {
+        throw new Error('Firebase is not configured. Set NEXT_PUBLIC_FIREBASE_* env vars.')
+      }
       const result = await createUserWithEmailAndPassword(auth, email, password)
       setUser(result.user)
       
-      // Redirect to dashboard after successful signup
-      router.push('/dashboard')
+      router.push('/demo')
     } catch (error) {
       console.error('Error signing up with email:', error)
       throw error
@@ -91,7 +107,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = async () => {
     try {
-      await firebaseSignOut(auth)
+      const auth = getFirebaseAuth()
+      if (auth) {
+        await firebaseSignOut(auth)
+      }
       setUser(null)
       
       // Redirect to home page after logout

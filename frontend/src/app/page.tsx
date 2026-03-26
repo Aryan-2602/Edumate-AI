@@ -53,8 +53,7 @@ export default function HomePage() {
 
   const handleGetStarted = () => {
     if (user) {
-      // User is already logged in, redirect to dashboard
-      window.location.href = '/dashboard'
+      window.location.href = '/demo'
     } else {
       // User needs to sign in
       signInWithGoogle()
@@ -81,12 +80,15 @@ export default function HomePage() {
             <Link href="#pricing" className="text-gray-600 hover:text-primary-600 transition-colors">
               Pricing
             </Link>
+            <Link href="/demo" className="text-gray-600 hover:text-primary-600 transition-colors">
+              Demo
+            </Link>
           </div>
 
           <div className="flex items-center space-x-4">
             {user ? (
-              <Link href="/dashboard" className="btn-primary">
-                Go to Dashboard
+              <Link href="/demo" className="btn-primary">
+                Go to Demo
               </Link>
             ) : (
               <>

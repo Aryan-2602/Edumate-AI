@@ -1,17 +1,32 @@
-import json
 import logging
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import chromadb
-from langchain.chains import RetrievalQA
+from langchain.callbacks.manager import CallbackManager
+from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
 from langchain_community.vectorstores import Chroma
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from app.config import settings
-from app.services.document_processor import DocumentProcessor
 from app import telemetry
+from app.guards.rag_answer import assess_rag_answer, rag_fallback_message
+from app.guards.retrieval_context import (
+    assess_retrieval_for_generation,
+    documents_from_results,
+)
+from app.guards.structured_output import (
+    parse_json_array_from_llm,
+    validate_flashcard_items,
+    validate_quiz_items,
+)
+from app.observability.langchain_timing import (
+    LlmUsageCaptureHandler,
+    token_usage_from_chat_message,
+)
+from app.services.document_processor import DocumentProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +39,28 @@ def stamp_chunk_metadata(docs: List[Document], user_id: str, document_id: int) -
         doc.metadata = meta
 
 
-def _search_filter(document_ids: Optional[List[int]]) -> Optional[Dict[str, Any]]:
-    if not document_ids:
-        return None
-    ids = [str(i) for i in document_ids]
-    if len(ids) == 1:
-        return {"document_id": ids[0]}
-    return {"document_id": {"$in": ids}}
+def _similarity_search_filtered(
+    vector_store: Chroma,
+    question: str,
+    top_k: int,
+    document_ids: Optional[List[int]],
+) -> List[Tuple[Document, float]]:
+    k_fetch = (
+        min(top_k * 5, settings.rag_top_k_max)
+        if document_ids
+        else top_k
+    )
+    results = vector_store.similarity_search_with_score(question, k=k_fetch)
+    if document_ids:
+        allowed = {str(i) for i in document_ids}
+        results = [
+            (d, s)
+            for d, s in results
+            if d.metadata.get("document_id") in allowed
+        ][:top_k]
+    else:
+        results = results[:top_k]
+    return results
 
 
 class AIService:
@@ -52,6 +82,7 @@ class AIService:
         except TypeError:
             self.llm = ChatOpenAI(**_llm_kw)
         self.vector_store: Optional[Chroma] = None
+        self._stuff_qa_chain = load_qa_chain(self.llm, chain_type="stuff")
 
     def process_document(self, file_path: str, file_type: str) -> List[Document]:
         documents = DocumentProcessor.process_file(file_path, file_type)
@@ -99,6 +130,7 @@ class AIService:
         collection_name: str,
         top_k: int = 5,
         document_ids: Optional[List[int]] = None,
+        metrics_out: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         try:
             vector_store = Chroma(
@@ -106,41 +138,97 @@ class AIService:
                 embedding_function=self.embeddings,
                 collection_name=collection_name,
             )
-            sk: Dict[str, Any] = {"k": top_k}
-            flt = _search_filter(document_ids)
-            if flt is not None:
-                sk["filter"] = flt
 
-            qa_chain = RetrievalQA.from_chain_type(
-                llm=self.llm,
-                chain_type="stuff",
-                retriever=vector_store.as_retriever(search_kwargs=sk),
-                return_source_documents=True,
+            t_r0 = time.perf_counter()
+            scored = _similarity_search_filtered(
+                vector_store, question, top_k, document_ids
+            )
+            retrieval_ms = (time.perf_counter() - t_r0) * 1000.0
+
+            r_assess = assess_retrieval_for_generation(
+                scored,
+                min_non_empty_chunks=settings.rag_guard_min_chunks,
+                min_total_chars=settings.rag_guard_min_context_chars,
+                max_best_distance=settings.rag_guard_max_best_distance,
             )
 
-            result = qa_chain({"query": question})
-            source_docs = []
-            if result.get("source_documents"):
-                for doc in result["source_documents"]:
-                    source_docs.append(
-                        {
-                            "content": doc.page_content[:200] + "...",
-                            "metadata": doc.metadata,
-                        }
-                    )
+            generation_ms = 0.0
+            guard_fallback = False
+            guard_reason = ""
 
-            response = {
-                "answer": result["result"],
+            if r_assess.is_failure:
+                guard_fallback = True
+                guard_reason = "retrieval:" + r_assess.reason
+                answer_text = rag_fallback_message(r_assess.reason)
+                source_documents: List[Document] = []
+            else:
+                source_documents = documents_from_results(list(scored))
+                context_joined = "\n".join(
+                    (d.page_content or "") for d in source_documents
+                )
+                cb_handler = LlmUsageCaptureHandler()
+                cb_manager = CallbackManager([cb_handler])
+                t_g0 = time.perf_counter()
+                chain_out = self._stuff_qa_chain(
+                    {"input_documents": source_documents, "question": question},
+                    callbacks=cb_manager,
+                )
+                generation_ms = (time.perf_counter() - t_g0) * 1000.0
+                answer_text = chain_out.get("output_text") or ""
+
+                if cb_handler.last_usage and metrics_out is not None:
+                    metrics_out["token_usage"] = cb_handler.last_usage
+
+                ans_assess = assess_rag_answer(
+                    answer_text,
+                    context_text=context_joined,
+                    question=question,
+                    min_answer_chars=settings.rag_guard_min_answer_chars,
+                    min_context_word_overlap=settings.rag_guard_min_context_word_overlap,
+                )
+                if not ans_assess.ok:
+                    logger.warning(
+                        "guard_fallback rag_answer post_check reason=%s",
+                        ans_assess.reason,
+                    )
+                    guard_fallback = True
+                    guard_reason = "answer:" + ans_assess.reason
+                    answer_text = rag_fallback_message(ans_assess.reason)
+
+            source_docs = []
+            for doc in source_documents:
+                source_docs.append(
+                    {
+                        "content": doc.page_content[:200] + "...",
+                        "metadata": doc.metadata,
+                    }
+                )
+
+            if metrics_out is not None:
+                metrics_out["retrieval_ms"] = round(retrieval_ms, 4)
+                metrics_out["generation_ms"] = round(generation_ms, 4)
+                metrics_out["retrieved_chunks"] = len(source_documents)
+                metrics_out["guard_fallback"] = guard_fallback
+                if guard_reason:
+                    metrics_out["guard_reason"] = guard_reason
+
+            response: Dict[str, Any] = {
+                "answer": answer_text,
                 "sources": source_docs,
                 "question": question,
             }
+            if guard_fallback:
+                response["guard_fallback"] = True
+                response["guard_reason"] = guard_reason
+
             telemetry.log_metrics(
                 {
                     "question_answered": True,
                     "question_length": len(question),
-                    "answer_length": len(result["result"]),
+                    "answer_length": len(answer_text),
                     "source_count": len(source_docs),
                     "filtered_documents": len(document_ids) if document_ids else 0,
+                    "rag_guard_fallback": guard_fallback,
                 }
             )
             return response
@@ -148,7 +236,12 @@ class AIService:
             logger.error("Error answering question: %s", e)
             raise
 
-    def generate_quiz(self, content: str, num_questions: int = 5) -> List[Dict[str, Any]]:
+    def generate_quiz(
+        self,
+        content: str,
+        num_questions: int = 5,
+        metrics_out: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         try:
             prompt_template = PromptTemplate(
                 input_variables=["content", "num_questions"],
@@ -176,17 +269,24 @@ class AIService:
                 content=content, num_questions=num_questions
             )
             response = self.llm.invoke(prompt)
+            if metrics_out is not None:
+                tu = token_usage_from_chat_message(response)
+                if tu:
+                    metrics_out["token_usage"] = tu
 
             raw = response.content
-            try:
-                quiz_questions = json.loads(raw)
-            except json.JSONDecodeError:
-                start = raw.find("[")
-                end = raw.rfind("]") + 1
-                if start != -1 and end > start:
-                    quiz_questions = json.loads(raw[start:end])
-                else:
-                    raise ValueError("Could not parse quiz questions from LLM response")
+            items, err = parse_json_array_from_llm(raw)
+            if err:
+                logger.warning("guard_fallback structured_output kind=quiz reason=%s", err)
+                raise ValueError(f"Could not parse quiz JSON: {err}")
+            ok, reason = validate_quiz_items(items, num_questions)
+            if not ok:
+                logger.warning(
+                    "guard_fallback structured_output kind=quiz reason=%s", reason
+                )
+                raise ValueError(f"Invalid quiz structure: {reason}")
+
+            quiz_questions = items[:num_questions]
 
             telemetry.log_metrics(
                 {
@@ -201,7 +301,12 @@ class AIService:
             logger.error("Error generating quiz: %s", e)
             raise
 
-    def generate_flashcards(self, content: str, num_cards: int = 10) -> List[Dict[str, str]]:
+    def generate_flashcards(
+        self,
+        content: str,
+        num_cards: int = 10,
+        metrics_out: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, str]]:
         try:
             prompt_template = PromptTemplate(
                 input_variables=["content", "num_cards"],
@@ -225,17 +330,27 @@ class AIService:
 
             prompt = prompt_template.format(content=content, num_cards=num_cards)
             response = self.llm.invoke(prompt)
+            if metrics_out is not None:
+                tu = token_usage_from_chat_message(response)
+                if tu:
+                    metrics_out["token_usage"] = tu
 
             raw = response.content
-            try:
-                flashcards = json.loads(raw)
-            except json.JSONDecodeError:
-                start = raw.find("[")
-                end = raw.rfind("]") + 1
-                if start != -1 and end > start:
-                    flashcards = json.loads(raw[start:end])
-                else:
-                    raise ValueError("Could not parse flashcards from LLM response")
+            items, err = parse_json_array_from_llm(raw)
+            if err:
+                logger.warning(
+                    "guard_fallback structured_output kind=flashcards reason=%s", err
+                )
+                raise ValueError(f"Could not parse flashcards JSON: {err}")
+            ok, reason = validate_flashcard_items(items, num_cards)
+            if not ok:
+                logger.warning(
+                    "guard_fallback structured_output kind=flashcards reason=%s",
+                    reason,
+                )
+                raise ValueError(f"Invalid flashcard structure: {reason}")
+
+            flashcards = items[:num_cards]
 
             telemetry.log_metrics(
                 {

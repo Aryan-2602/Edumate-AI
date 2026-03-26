@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     sentry_dsn: Optional[str] = None
     wandb_project: str = "edumate-ai"
     wandb_api_key: Optional[str] = None
+    # In-memory workflow metrics ring buffer + diagnostics (opt-in)
+    workflow_metrics_max_samples: int = 2000
+    enable_workflow_metrics_endpoint: bool = False
+    # If set, GET /diagnostics/workflow-metrics* requires header X-Admin-Metrics-Key
+    metrics_admin_key: Optional[str] = None
 
     # Security
     secret_key: str = "your-secret-key-change-in-production"
@@ -64,6 +69,13 @@ class Settings(BaseSettings):
     rate_limit_ai_write: str = "30/minute"
     rate_limit_upload: str = "20/minute"
     content_join_max_chars: int = 120000
+
+    # RAG guards (retrieval-before-generation + answer checks).
+    rag_guard_min_chunks: int = 1
+    rag_guard_min_context_chars: int = 40
+    rag_guard_max_best_distance: Optional[float] = 2.0
+    rag_guard_min_answer_chars: int = 5
+    rag_guard_min_context_word_overlap: int = 1
 
     class Config:
         env_file = ".env"

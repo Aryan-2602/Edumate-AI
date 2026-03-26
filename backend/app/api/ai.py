@@ -6,23 +6,25 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.database import (
-    Document,
-    DocumentChunk,
-    Flashcard,
-    FlashcardSet,
-    Question,
-    Quiz,
-    QuizQuestion,
-    User,
-    get_db,
-)
+from app.database import Flashcard, FlashcardSet, Question, Quiz, QuizQuestion, User, get_db
 from app.services.ai_service import AIService
-from app.services import progress_service
 from app.api.auth import get_current_user
 from app.deps import get_ai_service
 from app.config import settings
 from app.rate_limit import limiter
+from app.routing.intent_router import route_intent
+from app.workflows.errors import GuardrailError, InternalError, NotFound, ValidationError
+from app.workflows.types import (
+    FlashcardGenInput,
+    QuizGenInput,
+    RagAskInput,
+    WorkflowContext,
+)
+from app.workflows import (
+    flashcard_generation_workflow,
+    quiz_generation_workflow,
+    rag_qa_workflow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,36 +38,6 @@ def _parse_options(raw: Optional[str]) -> List:
         return json.loads(raw)
     except json.JSONDecodeError:
         return []
-
-
-def _load_document_text_for_generation(
-    db: Session, user_id: str, document_id: int
-) -> str:
-    document = (
-        db.query(Document)
-        .filter(Document.id == document_id, Document.user_id == user_id)
-        .first()
-    )
-    if not document:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document not found",
-        )
-    chunks = (
-        db.query(DocumentChunk)
-        .filter(DocumentChunk.document_id == document_id)
-        .order_by(DocumentChunk.chunk_index)
-        .all()
-    )
-    text = "\n\n".join(c.content for c in chunks)
-    if len(text) > settings.content_join_max_chars:
-        text = text[: settings.content_join_max_chars]
-    if not text.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Document has no indexed content to generate from",
-        )
-    return text
 
 
 class QuestionRequest(BaseModel):
@@ -99,49 +71,38 @@ async def ask_question(
 ):
     """Ask a question and get an AI-generated answer using RAG"""
     try:
-        collection_name = f"user_{current_user.id}_docs"
-        top_k = body.top_k if body.top_k is not None else settings.rag_top_k_default
-
-        response = ai_service.answer_question(
-            question=body.question,
-            collection_name=collection_name,
-            top_k=top_k,
-            document_ids=body.document_ids,
+        _ = route_intent(prompt=body.question, intent="rag")
+        ctx = WorkflowContext(
+            db=db,
+            current_user=current_user,
+            ai_service=ai_service,
+            settings=settings,
+            request_id=getattr(request.state, "request_id", None),
+            request_start_perf=getattr(request.state, "request_start_perf", None),
         )
-
-        db_question = Question(
-            user_id=current_user.id,
-            question_text=body.question,
-            answer_text=response["answer"],
-            source_documents=json.dumps(body.document_ids)
-            if body.document_ids
-            else None,
-            confidence_score=0.8,
+        result = rag_qa_workflow.run(
+            ctx,
+            RagAskInput(
+                question=body.question,
+                document_ids=body.document_ids,
+                top_k=body.top_k,
+            ),
         )
-        db.add(db_question)
-        db.commit()
-        db.refresh(db_question)
-
-        doc_id_for_progress = (
-            body.document_ids[0] if body.document_ids else None
-        )
-        progress_service.record_question_asked(
-            db, current_user.id, doc_id_for_progress
-        )
-        db.commit()
 
         logger.info("Question answered for user %s", current_user.id)
-
         return {
-            "question_id": db_question.id,
-            "question": response["question"],
-            "answer": response["answer"],
-            "sources": response["sources"],
-            "confidence_score": db_question.confidence_score,
+            "question_id": result.question_id,
+            "question": result.question,
+            "answer": result.answer,
+            "sources": result.sources,
+            "confidence_score": result.confidence_score,
         }
-
-    except HTTPException:
-        raise
+    except NotFound as e:
+        raise HTTPException(status_code=404, detail=e.message)
+    except (ValidationError, GuardrailError) as e:
+        raise HTTPException(status_code=400, detail=e.message)
+    except InternalError as e:
+        raise HTTPException(status_code=500, detail=e.message)
     except Exception as e:
         logger.error("Error answering question: %s", e)
         raise HTTPException(
@@ -161,57 +122,35 @@ async def generate_quiz(
 ):
     """Generate a quiz from a specific document"""
     try:
-        n = (
-            body.num_questions
-            if body.num_questions is not None
-            else settings.quiz_questions_default
+        _ = route_intent(prompt="quiz", intent="quiz")
+        ctx = WorkflowContext(
+            db=db,
+            current_user=current_user,
+            ai_service=ai_service,
+            settings=settings,
+            request_id=getattr(request.state, "request_id", None),
         )
-        content = _load_document_text_for_generation(
-            db, current_user.id, body.document_id
+        result = quiz_generation_workflow.run(
+            ctx,
+            QuizGenInput(
+                document_id=body.document_id,
+                num_questions=body.num_questions,
+            ),
         )
-
-        quiz_questions = ai_service.generate_quiz(content=content, num_questions=n)
-
-        db_quiz = Quiz(
-            user_id=current_user.id,
-            title=f"Quiz from Document {body.document_id}",
-            description=f"AI-generated quiz with {n} questions",
-            source_document_id=body.document_id,
-            question_count=len(quiz_questions),
-        )
-        db.add(db_quiz)
-        db.commit()
-        db.refresh(db_quiz)
-
-        for question_data in quiz_questions:
-            quiz_question = QuizQuestion(
-                quiz_id=db_quiz.id,
-                question_text=question_data["question"],
-                correct_answer=question_data["correct_answer"],
-                options=json.dumps(question_data["options"]),
-                explanation=question_data.get("explanation", ""),
-            )
-            db.add(quiz_question)
-
-        db.commit()
-
-        progress_service.record_quiz_generated(
-            db, current_user.id, body.document_id
-        )
-        db.commit()
-
         logger.info("Quiz generated for user %s", current_user.id)
-
         return {
-            "quiz_id": db_quiz.id,
-            "title": db_quiz.title,
-            "description": db_quiz.description,
-            "question_count": db_quiz.question_count,
-            "questions": quiz_questions,
+            "quiz_id": result.quiz_id,
+            "title": result.title,
+            "description": result.description,
+            "question_count": result.question_count,
+            "questions": result.questions,
         }
-
-    except HTTPException:
-        raise
+    except NotFound as e:
+        raise HTTPException(status_code=404, detail=e.message)
+    except (ValidationError, GuardrailError) as e:
+        raise HTTPException(status_code=400, detail=e.message)
+    except InternalError as e:
+        raise HTTPException(status_code=500, detail=e.message)
     except Exception as e:
         logger.error("Error generating quiz: %s", e)
         raise HTTPException(
@@ -231,50 +170,35 @@ async def generate_flashcards(
 ):
     """Generate flashcards from a specific document"""
     try:
-        n = body.num_cards if body.num_cards is not None else settings.flashcards_default
-        content = _load_document_text_for_generation(
-            db, current_user.id, body.document_id
+        _ = route_intent(prompt="flashcards", intent="flashcards")
+        ctx = WorkflowContext(
+            db=db,
+            current_user=current_user,
+            ai_service=ai_service,
+            settings=settings,
+            request_id=getattr(request.state, "request_id", None),
+            request_start_perf=getattr(request.state, "request_start_perf", None),
         )
-
-        flashcards = ai_service.generate_flashcards(content=content, num_cards=n)
-
-        db_set = FlashcardSet(
-            user_id=current_user.id,
-            source_document_id=body.document_id,
-            title=f"Flashcards from Document {body.document_id}",
-            description=f"AI-generated set with {len(flashcards)} cards",
-            card_count=len(flashcards),
+        result = flashcard_generation_workflow.run(
+            ctx,
+            FlashcardGenInput(
+                document_id=body.document_id,
+                num_cards=body.num_cards,
+            ),
         )
-        db.add(db_set)
-        db.commit()
-        db.refresh(db_set)
-
-        for card in flashcards:
-            db.add(
-                Flashcard(
-                    flashcard_set_id=db_set.id,
-                    front=card.get("front", ""),
-                    back=card.get("back", ""),
-                )
-            )
-        db.commit()
-
-        progress_service.record_flashcards_generated(
-            db, current_user.id, body.document_id, len(flashcards)
-        )
-        db.commit()
-
         logger.info("Flashcards generated for user %s", current_user.id)
-
         return {
-            "flashcard_set_id": db_set.id,
-            "document_id": body.document_id,
-            "flashcards": flashcards,
-            "total_cards": len(flashcards),
+            "flashcard_set_id": result.flashcard_set_id,
+            "document_id": result.document_id,
+            "flashcards": result.flashcards,
+            "total_cards": result.total_cards,
         }
-
-    except HTTPException:
-        raise
+    except NotFound as e:
+        raise HTTPException(status_code=404, detail=e.message)
+    except (ValidationError, GuardrailError) as e:
+        raise HTTPException(status_code=400, detail=e.message)
+    except InternalError as e:
+        raise HTTPException(status_code=500, detail=e.message)
     except Exception as e:
         logger.error("Error generating flashcards: %s", e)
         raise HTTPException(
