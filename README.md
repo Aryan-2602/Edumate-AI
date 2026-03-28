@@ -101,7 +101,14 @@ frontend/
 
 infrastructure/
 .github/
+data/             # optional: keep local PDFs here (gitignored); see below
 ```
+
+### Sample textbook (local)
+
+Place PDFs you want to test with under `data/` (for example `data/Mathematics-Textbook-Grade-5.pdf`). That folder is **gitignored** so large files stay on your machine.
+
+The backend does **not** watch or auto-import files from `data/`. To use a PDF in workflows, **upload** it through the API (`POST /api/v1/documents/upload`) or the frontend demo at `/demo` after S3 and auth are configured. Wait until `processing_status` is `completed`, then run ask / quiz / flashcards against the returned `document_id`.
 
 ## 🔄 Example Flow
 

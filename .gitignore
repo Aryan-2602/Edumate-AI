@@ -12,3 +12,6 @@ __pycache__/
 backend/.coverage
 backend/coverage.xml
 frontend/coverage/
+
+# Local PDFs / large assets (not committed)
+data/
