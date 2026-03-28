@@ -61,7 +61,7 @@ Keyword-based fallback is used for robustness.
 - Database: PostgreSQL (documents, quizzes, flashcards, progress)
 - Storage: AWS S3
 - Migrations: Alembic
-- Deployment: AWS Fargate
+- Deployment: AWS 
 
 ### Frontend (Minimal)
 
@@ -129,8 +129,10 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# Apply migrations (recommended for Postgres)
-alembic upgrade head
+# Postgres / staging: apply migrations
+# alembic upgrade head
+#
+# Local SQLite: tables are created automatically on startup (no Alembic needed for a fresh file—see "Local SQLite database" below).
 
 uvicorn app.main:app --reload
 ```
@@ -158,6 +160,13 @@ Minimum required (backend):
 DATABASE_URL=sqlite:///./edumate.db
 OPENAI_API_KEY=your_key
 ```
+
+### Local SQLite database
+
+- **No separate SQLite server** is required; Python creates a file (e.g. `backend/edumate.db`) when the app connects.
+- **Schema** is created on startup via SQLAlchemy `create_tables()` (see `app/main.py` lifespan). After `cp .env.example backend/.env` and setting `DATABASE_URL` / `OPENAI_API_KEY`, run `uvicorn` from `backend/` once; the file and tables appear automatically.
+- **Verify**: `GET /health/ready` should report `database: ok`. Optionally: `sqlite3 edumate.db ".tables"` from `backend/`.
+- **Alembic**: Existing revisions are additive on top of an implied base schema. Do **not** run `alembic upgrade head` on an empty database (migrations expect tables to exist). If you already have a full schema from `create_tables()`, `alembic upgrade head` may fail with duplicate-column errors. For local SQLite dev, rely on `create_tables()`; only use `alembic stamp head` if you intentionally want to mark the DB without running SQL (advanced).
 
 ## 🧪 Development
 
