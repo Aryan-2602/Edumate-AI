@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Literal, Optional
 import os
 
 
@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4"
     openai_max_tokens: int = 2000
     openai_temperature: float = 0.7
+
+    # Object storage: S3 (production) or local filesystem (dev)
+    storage_backend: Literal["s3", "local"] = "s3"
+    # Path relative to process cwd (run uvicorn from backend/ → ../data is repo data/)
+    local_storage_root: str = "../data"
 
     # AWS
     aws_access_key_id: Optional[str] = None

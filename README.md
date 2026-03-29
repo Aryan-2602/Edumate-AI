@@ -168,6 +168,8 @@ DATABASE_URL=sqlite:///./edumate.db
 OPENAI_API_KEY=your_key
 ```
 
+For **local file storage** (no S3), set `STORAGE_BACKEND=local` and `LOCAL_STORAGE_ROOT=../data` in `backend/.env` so uploads are stored under the repo `data/` folder. Use `STORAGE_BACKEND=s3` in production with AWS credentials.
+
 ### Local SQLite database
 
 - **No separate SQLite server** is required; Python creates a file (e.g. `backend/edumate.db`) when the app connects.

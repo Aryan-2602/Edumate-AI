@@ -3,7 +3,7 @@
 from functools import lru_cache
 
 from app.services.ai_service import AIService
-from app.services.storage_service import StorageService
+from app.services.storage_service import StorageService, build_storage_service
 
 
 @lru_cache
@@ -13,4 +13,4 @@ def get_ai_service() -> AIService:
 
 @lru_cache
 def get_storage_service() -> StorageService:
-    return StorageService()
+    return build_storage_service()

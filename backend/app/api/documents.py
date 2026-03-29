@@ -1,11 +1,12 @@
 import hashlib
 import logging
+import mimetypes
 import os
 import tempfile
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user
@@ -14,7 +15,7 @@ from app.database import Document, DocumentChunk, User, get_db
 from app.deps import get_ai_service, get_storage_service
 from app.jobs.document_ingestion import run_ingestion_for_document
 from app.rate_limit import limiter
-from app.services.storage_service import StorageService
+from app.services.storage_service import LocalStorageService, S3StorageService, StorageService
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +164,62 @@ async def list_documents(
         )
 
 
+@router.get("/{document_id}/download")
+async def download_document_file(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    storage_service: StorageService = Depends(get_storage_service),
+):
+    """Stream original file from disk when STORAGE_BACKEND=local (same-origin friendly)."""
+    if settings.storage_backend != "local" or not isinstance(
+        storage_service, LocalStorageService
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Direct download is only available when STORAGE_BACKEND=local",
+        )
+
+    try:
+        document = (
+            db.query(Document)
+            .filter(
+                Document.id == document_id,
+                Document.user_id == current_user.id,
+            )
+            .first()
+        )
+
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found",
+            )
+
+        path = storage_service.absolute_path(document.file_path)
+        if not path.is_file():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File not found on disk",
+            )
+
+        media_type, _ = mimetypes.guess_type(document.file_name)
+        return FileResponse(
+            path,
+            filename=document.file_name,
+            media_type=media_type or "application/octet-stream",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error downloading document %s: %s", document_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error downloading file",
+        )
+
+
 @router.get("/{document_id}")
 async def get_document(
     document_id: int,
@@ -194,7 +251,15 @@ async def get_document(
             .all()
         )
 
-        download_url = storage_service.get_file_url(document.file_path)
+        if settings.storage_backend == "local":
+            download_url = f"/api/v1/documents/{document_id}/download"
+        else:
+            if not isinstance(storage_service, S3StorageService):
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Storage configuration error",
+                )
+            download_url = storage_service.get_file_url(document.file_path)
 
         return {
             "id": document.id,

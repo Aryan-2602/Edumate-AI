@@ -7,6 +7,8 @@ import os
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-key-for-ci")
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_edumate.db")
 os.environ.setdefault("S3_VERIFY_BUCKET_ON_INIT", "false")
+os.environ.setdefault("STORAGE_BACKEND", "local")
+os.environ.setdefault("LOCAL_STORAGE_ROOT", "./.pytest_storage")
 
 import pytest
 from sqlalchemy import create_engine
